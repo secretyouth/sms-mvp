@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import bodyParser from "body-parser";
 import moment from "moment";
 import sqlite3 from "sqlite3";
@@ -28,7 +28,7 @@ const initDb = async () => {
 const API_KEY =
   "I6svucKvlzZaMD9oXVAhjcyU8KL063eQC7Z5HvCzaWGDWfpXv1g0S01bBhNc4VdXV0DjajAJxPgQsZvH1OwDVEP2fqR6nh7whVYn1LQepuh5yJyrg0OklrVNb3ClnnEg";
 
-app.use("/sms", (req, res, next) => {
+app.use("/sms", (req: Request, res: Response, next: NextFunction) => {
   const key = req.headers["x-api-key"];
   if (key !== API_KEY) {
     return res
@@ -39,7 +39,7 @@ app.use("/sms", (req, res, next) => {
   next();
 });
 
-app.post("/sms", async (req, res) => {
+app.post("/sms", async (req: Request, res: Response) => {
   const msg = req.body.Body || "";
   const match = msg.match(/MVP:\s*#(\d+)/i);
 
@@ -53,7 +53,7 @@ app.post("/sms", async (req, res) => {
   const jersey = `#${match[1]}`;
   const now = moment().toISOString();
 
-  db.all(`SELECT * FROM votes ORDER BY id ASC`, [], (err, rows: any[]) => {
+  db.all(`SELECT * FROM votes ORDER BY id ASC`, [], (err: any, rows: any[]) => {
     if (rows.length < 2) {
       db.run(`INSERT INTO votes (jersey, timestamp) VALUES (?, ?)`, [
         jersey,
@@ -84,7 +84,7 @@ app.post("/sms", async (req, res) => {
   });
 });
 
-app.get("/mvp-results", (req, res) => {
+app.get("/mvp-results", (req: Request, res: Response) => {
   if (!windowStart || !windowEnd) {
     return res.json({ message: "Voting window not active yet." });
   }
@@ -92,7 +92,7 @@ app.get("/mvp-results", (req, res) => {
   db.all(
     `SELECT jersey FROM votes WHERE timestamp BETWEEN ? AND ?`,
     [windowStart.toISOString(), windowEnd.toISOString()],
-    (err, rows: any[]) => {
+    (err: any, rows: any[]) => {
       const tally: Record<string, number> = {};
 
       for (const row of rows) {
@@ -111,7 +111,7 @@ app.get("/mvp-results", (req, res) => {
   );
 });
 
-app.get("/", (req, res) => {
+app.get("/", (req: Request, res: Response) => {
   res.send("MVP Voting API (TS) is running.");
 });
 
