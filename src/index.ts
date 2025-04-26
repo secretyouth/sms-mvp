@@ -25,6 +25,20 @@ const initDb = async () => {
   )`);
 };
 
+const API_KEY =
+  "I6svucKvlzZaMD9oXVAhjcyU8KL063eQC7Z5HvCzaWGDWfpXv1g0S01bBhNc4VdXV0DjajAJxPgQsZvH1OwDVEP2fqR6nh7whVYn1LQepuh5yJyrg0OklrVNb3ClnnEg";
+
+app.use("/sms", (req, res, next) => {
+  const key = req.headers["x-api-key"];
+  if (key !== API_KEY) {
+    return res
+      .status(401)
+      .type("text/xml")
+      .send(`<Response><Message>Unauthorized</Message></Response>`);
+  }
+  next();
+});
+
 app.post("/sms", async (req, res) => {
   const msg = req.body.Body || "";
   const match = msg.match(/MVP:\s*#(\d+)/i);
