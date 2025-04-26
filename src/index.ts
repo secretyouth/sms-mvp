@@ -1,121 +1,172 @@
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response } from "express";
 import bodyParser from "body-parser";
 import moment from "moment";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+import { DbService } from "./services/db-service"; // Adjust path as needed
 
 const app = express();
+const port = 3000;
+
+// Initialize database service
+const dbService = new DbService(process.env.DB_PATH || "./poll.db");
+
 app.use(bodyParser.urlencoded({ extended: false }));
 
-let windowStart: moment.Moment | null = null;
-let windowEnd: moment.Moment | null = null;
+// Helper function to clean and parse incoming votes
+function parseVotes(body: string): number[] {
+  return body
+    .replace(/[\n\r]+/g, " ")
+    .split(/[\s,]+/)
+    .map((vote) => parseInt(vote.trim()))
+    .filter((vote) => !isNaN(vote));
+}
 
-// Initialize SQLite
-let db: sqlite3.Database;
-const initDb = async () => {
-  db = (await open({
-    filename: "./votes.db",
-    driver: sqlite3.Database,
-  })) as unknown as sqlite3.Database;
-
-  db.run(`CREATE TABLE IF NOT EXISTS votes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    jersey TEXT,
-    timestamp TEXT
-  )`);
-};
-
-const API_KEY =
-  "I6svucKvlzZaMD9oXVAhjcyU8KL063eQC7Z5HvCzaWGDWfpXv1g0S01bBhNc4VdXV0DjajAJxPgQsZvH1OwDVEP2fqR6nh7whVYn1LQepuh5yJyrg0OklrVNb3ClnnEg";
-
-app.use("/sms", (req: Request, res: Response, next: NextFunction) => {
-  const key = req.headers["x-api-key"];
-  if (key !== API_KEY) {
-    return res
-      .status(401)
-      .type("text/xml")
-      .send(`<Response><Message>Unauthorized</Message></Response>`);
-  }
-  next();
-});
-
+// Route to handle incoming SMS
 app.post("/sms", async (req: Request, res: Response) => {
-  const msg = req.body.Body || "";
-  const match = msg.match(/MVP:\s*#(\d+)/i);
+  const { Body: body, From: from } = req.body; // Twilio uses 'From' and 'Body'
+  console.log("🚀 ~ app.post ~ body:", body, "from:", from);
 
-  if (!match) {
-    res.type("text/xml");
-    return res.send(
-      `<Response><Message>Invalid format. Use: MVP: #23</Message></Response>`,
-    );
+  if (!from) {
+    return res.status(400).send("Missing 'From' phone number.");
   }
 
-  const jersey = `#${match[1]}`;
-  const now = moment().toISOString();
+  try {
+    // Get poll state
+    const pollState = await dbService.getPollState();
+    const pollOpen = pollState.is_open;
+    const pollStartTime = pollState.start_time
+      ? moment(pollState.start_time)
+      : null;
 
-  db.all(`SELECT * FROM votes ORDER BY id ASC`, [], (err: any, rows: any[]) => {
-    if (rows.length < 2) {
-      db.run(`INSERT INTO votes (jersey, timestamp) VALUES (?, ?)`, [
-        jersey,
-        now,
-      ]);
-      if (rows.length === 1) {
-        windowStart = moment(now);
-        windowEnd = moment(now).add(3, "hours");
+    // Handle "open" command
+    if (body.trim().toLowerCase() === "open") {
+      if (pollOpen) {
+        return res.status(400).send("Poll is already open.");
       }
-    } else {
-      const nowMoment = moment(now);
-      if (
-        windowStart &&
-        windowEnd &&
-        nowMoment.isBetween(windowStart, windowEnd)
-      ) {
-        db.run(`INSERT INTO votes (jersey, timestamp) VALUES (?, ?)`, [
-          jersey,
-          now,
-        ]);
-      }
+      await dbService.openPoll();
+      console.log("Poll opened");
+      return res.set("Content-Type", "text/xml").send(`
+        <Response>
+          <Message>Poll has been opened! Vote now!</Message>
+        </Response>
+      `);
     }
 
-    res.type("text/xml");
-    res.send(
-      `<Response><Message>Vote received for ${jersey}. Thanks!</Message></Response>`,
-    );
-  });
-});
+    // Handle "close" command
+    if (body.trim().toLowerCase() === "close") {
+      if (!pollOpen) {
+        return res.status(400).send("No active poll to close.");
+      }
+      await dbService.closePoll();
+      console.log("Poll closed");
+      return res.set("Content-Type", "text/xml").send(`
+        <Response>
+          <Message>Poll has been closed. Thank you for participating!</Message>
+        </Response>
+      `);
+    }
 
-app.get("/mvp-results", (req: Request, res: Response) => {
-  if (!windowStart || !windowEnd) {
-    return res.json({ message: "Voting window not active yet." });
-  }
-
-  db.all(
-    `SELECT jersey FROM votes WHERE timestamp BETWEEN ? AND ?`,
-    [windowStart.toISOString(), windowEnd.toISOString()],
-    (err: any, rows: any[]) => {
-      const tally: Record<string, number> = {};
-
-      for (const row of rows) {
-        tally[row.jersey] = (tally[row.jersey] || 0) + 1;
+    // Handle "results" command
+    if (body.trim().toLowerCase() === "results") {
+      if (pollOpen && pollStartTime) {
+        // Get current poll results
+        const results = await dbService.getCurrentResults(
+          pollState.start_time!,
+        );
+        let message = "Current Poll Results:\n";
+        results.forEach((row, index) => {
+          message += `${index + 1}. Jersey Number: ${
+            row.jersey_number
+          }, Points: ${row.points}\n`;
+        });
+        return res.set("Content-Type", "text/xml").send(`
+          <Response>
+            <Message>${message}</Message>
+          </Response>
+        `);
       }
 
-      const sorted = Object.entries(tally).sort((a, b) => b[1] - a[1]);
-      const results = {
-        "3 Stars": sorted[0]?.[0] || "N/A",
-        "2 Stars": sorted[1]?.[0] || "N/A",
-        "1 Star": sorted[2]?.[0] || "N/A",
-      };
+      // Get latest closed poll results
+      const results = await dbService.getLatestClosedResults();
+      if (results.length === 0) {
+        return res.status(400).send("No polls have been closed yet.");
+      }
+      let message = "Latest Closed Poll Results:\n";
+      results.forEach((row, index) => {
+        message += `${index + 1}. Jersey Number: ${
+          row.jersey_number
+        }, Points: ${row.points}\n`;
+      });
+      return res.set("Content-Type", "text/xml").send(`
+        <Response>
+          <Message>${message}</Message>
+        </Response>
+      `);
+    }
 
-      res.json(results);
-    },
-  );
+    // Check if poll is closed or expired
+    if (
+      !pollOpen ||
+      !pollStartTime ||
+      moment().isAfter(pollStartTime.add(24, "hours"))
+    ) {
+      return res.status(400).send("The poll is closed or expired.");
+    }
+
+    // Parse and record votes
+    const votes = parseVotes(body);
+    if (votes.length === 0 || votes.length > 3) {
+      return res
+        .status(400)
+        .send("Invalid vote format. Please send 1 to 3 jersey numbers.");
+    }
+
+    const voteInserts: [number, number][] = [];
+    if (votes[0]) voteInserts.push([votes[0], 3]);
+    if (votes[1]) voteInserts.push([votes[1], 2]);
+    if (votes[2]) voteInserts.push([votes[2], 1]);
+
+    await dbService.recordVotes(from, pollState.start_time!, voteInserts);
+    console.log(
+      `Vote received from ${from}: ${votes[0]} (3 points), ${votes[1]} (2 points), ${votes[2]} (1 point)`,
+    );
+
+    return res.set("Content-Type", "text/xml").send(`
+      <Response>
+        <Message>Thank you for your vote! Your vote has been recorded.</Message>
+      </Response>
+    `);
+  } catch (err) {
+    console.error("Error processing SMS:", err);
+    return res.status(500).send("Server error.");
+  }
 });
 
-app.get("/", (req: Request, res: Response) => {
-  res.send("MVP Voting API (TS) is running.");
+// Route to get the latest poll results
+app.get("/poll-results", async (req: Request, res: Response) => {
+  try {
+    const results = await dbService.getLatestClosedResults();
+    if (results.length === 0) {
+      return res.status(400).send("No closed polls available.");
+    }
+    let message = "Latest Poll Results:\n";
+    results.forEach((row, index) => {
+      message += `${index + 1}. Jersey Number: ${row.jersey_number}, Points: ${
+        row.points
+      }\n`;
+    });
+    res.send(message);
+  } catch (err) {
+    console.error("Error fetching poll results:", err);
+    res.status(500).send("Server error.");
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-initDb().then(() => {
-  app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// Close database on process exit
+process.on("SIGINT", () => {
+  dbService.close();
+  process.exit(0);
+});
+
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
 });
